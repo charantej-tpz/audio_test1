@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Clean WAV Recorder</title>
+    <script type="module" src="/src/main.js"></script>
+
+  </head>
+
+  <body>
+    <div class="container">
+
+      <label class="label">Sample Rate</label>
+      <select id="sampleRate" class="dropdown">
+        <option value="16000">16 kHz</option>
+        <option value="48000">48 kHz</option>
+      </select>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="removeSilence" />
+        <label for="removeSilence">Remove Starting Silence</label>
+      </div>
+
+      <div class="record-area">
+        <img src="mic.png" class="mic" />
+        <button id="recordBtn" class="btn">Start recording</button>
+      </div>
+
+      <button id="downloadBtn" class="download" disabled>Download</button>
+    </div>
+  </body>
+</html>
