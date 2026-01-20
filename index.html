@@ -1,32 +1,38 @@
 <!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="UTF-8" />
-    <title>Clean WAV Recorder</title>
-    <script type="module" src="/src/main.js"></script>
+<html lang="en">
 
-  </head>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Audio Recorder</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+  <script type="module" src="/src/main-scriptprocessor.js"></script>
+</head>
 
-  <body>
-    <div class="container">
+<body>
+  <div class="container">
+    <h1>🎙️ Audio Recorder</h1>
 
-      <label class="label">Sample Rate</label>
-      <select id="sampleRate" class="dropdown">
-        <option value="16000">16 kHz</option>
-        <option value="48000">48 kHz</option>
-      </select>
+    <label class="label">Sample Rate</label>
+    <select id="sampleRate" class="dropdown">
+      <option value="16000">16 kHz</option>
+      <option value="48000">48 kHz</option>
+    </select>
 
-      <div class="checkbox-row">
-        <input type="checkbox" id="removeSilence" />
-        <label for="removeSilence">Remove Starting Silence</label>
-      </div>
-
-      <div class="record-area">
-        <img src="mic.png" class="mic" />
-        <button id="recordBtn" class="btn">Start recording</button>
-      </div>
-
-      <button id="downloadBtn" class="download" disabled>Download</button>
+    <div class="checkbox-row">
+      <input type="checkbox" id="removeSilence" />
+      <label for="removeSilence">Remove Starting Silence</label>
     </div>
-  </body>
+
+    <div class="record-area">
+      <div class="mic-container">
+        <div class="mic-icon">🎤</div>
+      </div>
+      <button id="recordBtn" class="btn">Start Recording</button>
+    </div>
+
+    <button id="downloadBtn" class="download" disabled>Download WAV</button>
+  </div>
+</body>
+
 </html>

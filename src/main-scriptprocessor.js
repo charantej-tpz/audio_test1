@@ -66,11 +66,16 @@ async function toggleRecording() {
         sourceNode.connect(scriptNode);
         scriptNode.connect(audioCtx.destination);
 
-        recordBtn.innerText = "Stop recording";
+        // Visual feedback
+        recordBtn.innerText = "Stop Recording";
+        recordBtn.classList.add("recording");
+        document.querySelector(".mic-icon")?.classList.add("recording");
 
     } else {
         // Stop
-        recordBtn.innerText = "Start recording";
+        recordBtn.innerText = "Start Recording";
+        recordBtn.classList.remove("recording");
+        document.querySelector(".mic-icon")?.classList.remove("recording");
 
         if (sourceNode) sourceNode.disconnect();
         if (scriptNode) {
