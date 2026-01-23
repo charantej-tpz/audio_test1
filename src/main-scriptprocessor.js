@@ -154,10 +154,10 @@ const AudioRecorder = (() => {
                 const pcm16 = AudioProcessor.downsample(clonedData, state.audioContext.sampleRate);
 
                 if (shouldRemoveInitialSilence && state.recordedChunks.length === 0) {
-                    if (SilenceDetector.isAbsolutelySilent(pcm16)) return;
+                    if (SilenceDetector.isAbsolutelySilent(pcm16) || SilenceDetector.isBelowThreshold(pcm16)) {
+                        return;
+                    }
                 }
-
-                if (SilenceDetector.isBelowThreshold(pcm16)) return;
 
                 state.recordedChunks.push(pcm16);
             };
