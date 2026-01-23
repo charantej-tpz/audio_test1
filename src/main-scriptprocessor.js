@@ -1,195 +1,219 @@
-// Alternative implementation using ScriptProcessorNode (deprecated but works)
-// No separate worklet file needed!
+const AudioRecorder = (() => {
+    const CONFIG = {
+        SAMPLE_RATE: 48000,
+        TARGET_SAMPLE_RATE: 16000,
+        BUFFER_SIZE: 4096,
+        SILENCE_THRESHOLD: 25,
+        BIT_DEPTH: 16,
+        CHANNELS: 1,
+    };
 
-document.addEventListener("DOMContentLoaded", () => {
-    const recordBtn = document.getElementById("recordBtn");
-    const downloadBtn = document.getElementById("downloadBtn");
+    const state = {
+        audioContext: null,
+        scriptProcessor: null,
+        mediaSource: null,
+        recordedChunks: [],
+        finalWavBuffer: null,
+    };
 
-    recordBtn.onclick = toggleRecording;
-    downloadBtn.onclick = downloadRecording;
+    const getElements = () => ({
+        recordBtn: document.getElementById("recordBtn"),
+        downloadBtn: document.getElementById("downloadBtn"),
+        removeSilenceCheckbox: document.getElementById("removeSilence"),
+        micIcon: document.querySelector(".mic-icon"),
+    });
 
-    console.log("ScriptProcessorNode version - Event listeners attached");
-});
+    const AudioProcessor = {
+        downsample(float32Data, sourceRate) {
+            const ratio = sourceRate / CONFIG.TARGET_SAMPLE_RATE;
+            const outputLength = Math.floor(float32Data.length / ratio);
+            const output = new Int16Array(outputLength);
 
-let audioCtx = null;
-let chunks = [];
-let scriptNode = null;
-let sourceNode = null;
-let wavResult = null;
+            for (let i = 0; i < outputLength; i++) {
+                const srcIndex = i * ratio;
+                const floor = Math.floor(srcIndex);
+                const ceil = Math.min(floor + 1, float32Data.length - 1);
+                const fraction = srcIndex - floor;
 
-// ---------------- START / STOP ----------------
-
-async function toggleRecording() {
-    const recordBtn = document.getElementById("recordBtn");
-    const downloadBtn = document.getElementById("downloadBtn");
-    const removeSilence = document.getElementById("removeSilence").checked;
-
-    if (!audioCtx) {
-        // Start
-        chunks = [];
-        downloadBtn.disabled = true;
-
-        const stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                noiseSuppression: false,
-                echoCancellation: false,
-                autoGainControl: false,
-                channelCount: 1,
+                const interpolated = float32Data[floor] * (1 - fraction) + float32Data[ceil] * fraction;
+                output[i] = interpolated * 0x7fff;
             }
-        });
 
-        audioCtx = new AudioContext({ sampleRate: 48000 });
-        sourceNode = audioCtx.createMediaStreamSource(stream);
+            return output;
+        },
 
-        // ScriptProcessorNode: bufferSize, numInputChannels, numOutputChannels
-        // Buffer sizes: 256, 512, 1024, 2048, 4096, 8192, 16384
-        const bufferSize = 4096;
-        scriptNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+        mergeChunks(chunks) {
+            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            const merged = new Int16Array(totalLength);
 
-        scriptNode.onaudioprocess = (audioProcessingEvent) => {
-            if (!audioCtx) return;
+            let offset = 0;
+            for (const chunk of chunks) {
+                merged.set(chunk, offset);
+                offset += chunk.length;
+            }
 
-            const inputBuffer = audioProcessingEvent.inputBuffer;
-            const float32 = inputBuffer.getChannelData(0);
+            return merged;
+        },
+    };
 
-            // Clone the data (important - buffer gets reused!)
-            const float32Copy = new Float32Array(float32);
-            const pcm16 = downsampleTo16k(float32Copy, audioCtx.sampleRate);
+    const SilenceDetector = {
+        isAbsolutelySilent(samples) {
+            return samples.every(sample => sample === 0);
+        },
 
-            if (removeSilence && chunks.length === 0 && isSilent(pcm16)) return;
-            if (isSilentFrame(pcm16)) return;
+        isBelowThreshold(samples) {
+            const sumOfSquares = samples.reduce((sum, val) => sum + val * val, 0);
+            const rms = Math.sqrt(sumOfSquares / samples.length);
+            return rms < CONFIG.SILENCE_THRESHOLD;
+        },
+    };
 
-            chunks.push(pcm16);
-        };
+    const WavEncoder = {
+        writeString(view, offset, text) {
+            for (let i = 0; i < text.length; i++) {
+                view.setUint8(offset + i, text.charCodeAt(i));
+            }
+        },
 
-        // Connect: source -> scriptProcessor -> destination (required for processing)
-        sourceNode.connect(scriptNode);
-        scriptNode.connect(audioCtx.destination);
+        encode(samples) {
+            const headerSize = 44;
+            const dataSize = samples.length * 2;
+            const buffer = new ArrayBuffer(headerSize + dataSize);
+            const view = new DataView(buffer);
 
-        // Visual feedback
-        recordBtn.innerText = "Stop Recording";
-        recordBtn.classList.add("recording");
-        document.querySelector(".mic-icon")?.classList.add("recording");
+            this.writeString(view, 0, "RIFF");
+            view.setUint32(4, 36 + dataSize, true);
+            this.writeString(view, 8, "WAVE");
 
-    } else {
-        // Stop
-        recordBtn.innerText = "Start Recording";
-        recordBtn.classList.remove("recording");
-        document.querySelector(".mic-icon")?.classList.remove("recording");
+            this.writeString(view, 12, "fmt ");
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, CONFIG.CHANNELS, true);
+            view.setUint32(24, CONFIG.TARGET_SAMPLE_RATE, true);
+            view.setUint32(28, CONFIG.TARGET_SAMPLE_RATE * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, CONFIG.BIT_DEPTH, true);
 
-        if (sourceNode) sourceNode.disconnect();
-        if (scriptNode) {
-            scriptNode.disconnect();
-            scriptNode.onaudioprocess = null;
-        }
+            this.writeString(view, 36, "data");
+            view.setUint32(40, dataSize, true);
 
-        const mergedPCM = mergeChunks(chunks);
-        wavResult = buildWav(mergedPCM);
+            let writeOffset = headerSize;
+            for (const sample of samples) {
+                view.setInt16(writeOffset, sample, true);
+                writeOffset += 2;
+            }
 
-        downloadBtn.disabled = false;
+            return buffer;
+        },
+    };
 
-        audioCtx.close();
-        audioCtx = null;
-    }
-}
+    const UI = {
+        setRecordingState(isRecording) {
+            const { recordBtn, micIcon } = getElements();
 
-// ---------------- DOWNLOAD ----------------
+            recordBtn.innerText = isRecording ? "Stop Recording" : "Start Recording";
+            recordBtn.classList.toggle("recording", isRecording);
+            micIcon?.classList.toggle("recording", isRecording);
+        },
 
-function downloadRecording() {
-    if (!wavResult) return;
+        enableDownload(enabled) {
+            getElements().downloadBtn.disabled = !enabled;
+        },
+    };
 
-    const blob = new Blob([wavResult], { type: "audio/wav" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "recording_16k.wav";
-    a.click();
-    URL.revokeObjectURL(url);
-}
+    const RecordingController = {
+        async start() {
+            const { removeSilenceCheckbox } = getElements();
+            const shouldRemoveInitialSilence = removeSilenceCheckbox.checked;
 
-// ---------------- UTILITIES ----------------
+            state.recordedChunks = [];
+            UI.enableDownload(false);
 
-function isSilent(chunk) {
-    for (const v of chunk) {
-        if (v !== 0) return false;
-    }
-    return true;
-}
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    noiseSuppression: false,
+                    echoCancellation: false,
+                    autoGainControl: false,
+                    channelCount: CONFIG.CHANNELS,
+                },
+            });
 
-function mergeChunks(chunks) {
-    let total = 0;
-    chunks.forEach(c => total += c.length);
+            state.audioContext = new AudioContext({ sampleRate: CONFIG.SAMPLE_RATE });
+            state.mediaSource = state.audioContext.createMediaStreamSource(stream);
+            state.scriptProcessor = state.audioContext.createScriptProcessor(
+                CONFIG.BUFFER_SIZE,
+                CONFIG.CHANNELS,
+                CONFIG.CHANNELS
+            );
 
-    const result = new Int16Array(total);
-    let offset = 0;
+            state.scriptProcessor.onaudioprocess = (event) => {
+                if (!state.audioContext) return;
 
-    for (const c of chunks) {
-        result.set(c, offset);
-        offset += c.length;
-    }
+                const inputData = event.inputBuffer.getChannelData(0);
+                const clonedData = new Float32Array(inputData);
+                const pcm16 = AudioProcessor.downsample(clonedData, state.audioContext.sampleRate);
 
-    return result;
-}
+                if (shouldRemoveInitialSilence && state.recordedChunks.length === 0) {
+                    if (SilenceDetector.isAbsolutelySilent(pcm16)) return;
+                }
 
-function downsampleTo16k(input, rate) {
-    const ratio = rate / 16000;
-    const length = Math.floor(input.length / ratio);
-    const output = new Int16Array(length);
+                if (SilenceDetector.isBelowThreshold(pcm16)) return;
 
-    for (let i = 0; i < length; i++) {
-        const idx = i * ratio;
-        const i0 = Math.floor(idx);
-        const i1 = Math.min(i0 + 1, input.length - 1);
-        const frac = idx - i0;
+                state.recordedChunks.push(pcm16);
+            };
 
-        const sample = input[i0] * (1 - frac) + input[i1] * frac;
-        output[i] = sample * 0x7fff;
-    }
-    return output;
-}
+            state.mediaSource.connect(state.scriptProcessor);
+            state.scriptProcessor.connect(state.audioContext.destination);
 
-function buildWav(samples) {
-    const buffer = new ArrayBuffer(44 + samples.length * 2);
-    const view = new DataView(buffer);
+            UI.setRecordingState(true);
+        },
 
-    write(view, 0, "RIFF");
-    view.setUint32(4, 36 + samples.length * 2, true);
-    write(view, 8, "WAVE");
+        stop() {
+            state.mediaSource?.disconnect();
+            if (state.scriptProcessor) {
+                state.scriptProcessor.disconnect();
+                state.scriptProcessor.onaudioprocess = null;
+            }
 
-    write(view, 12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, 16000, true);
-    view.setUint32(28, 16000 * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
+            const mergedPCM = AudioProcessor.mergeChunks(state.recordedChunks);
+            state.finalWavBuffer = WavEncoder.encode(mergedPCM);
 
-    write(view, 36, "data");
-    view.setUint32(40, samples.length * 2, true);
+            state.audioContext?.close();
+            state.audioContext = null;
 
-    let offset = 44;
-    for (let i = 0; i < samples.length; i++) {
-        view.setInt16(offset, samples[i], true);
-        offset += 2;
-    }
+            UI.setRecordingState(false);
+            UI.enableDownload(true);
+        },
 
-    return buffer;
-}
+        toggle() {
+            state.audioContext ? this.stop() : this.start();
+        },
+    };
 
-function write(view, offset, text) {
-    for (let i = 0; i < text.length; i++) {
-        view.setUint8(offset + i, text.charCodeAt(i));
-    }
-}
+    const downloadRecording = () => {
+        if (!state.finalWavBuffer) return;
 
-function isSilentFrame(int16) {
-    let sum = 0;
-    for (let i = 0; i < int16.length; i++) {
-        const v = int16[i];
-        sum += v * v;
-    }
-    const rms = Math.sqrt(sum / int16.length);
+        const blob = new Blob([state.finalWavBuffer], { type: "audio/wav" });
+        const url = URL.createObjectURL(blob);
 
-    return rms < 25;
-}
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "recording_16k.wav";
+        anchor.click();
+
+        URL.revokeObjectURL(url);
+    };
+
+    const init = () => {
+        const { recordBtn, downloadBtn } = getElements();
+
+        recordBtn.onclick = () => RecordingController.toggle();
+        downloadBtn.onclick = downloadRecording;
+
+        console.log("ScriptProcessorNode version - Event listeners attached");
+    };
+
+    return { init };
+})();
+
+document.addEventListener("DOMContentLoaded", () => AudioRecorder.init());
