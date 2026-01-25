@@ -22,7 +22,9 @@ const AudioRecorder = (() => {
         lastCallbackTime: null,
         callbackCount: 0,
         totalSamplesReceived: 0,
-        gaps: [], // Array of { timestamp, gapMs, expectedMs }
+        totalDownsampledSamples: 0,  // Track downsampled output
+        actualSampleRate: null,      // Track actual device sample rate
+        gaps: [],
         expectedIntervalMs: null,
     };
 
@@ -31,6 +33,8 @@ const AudioRecorder = (() => {
         diagnostics.lastCallbackTime = null;
         diagnostics.callbackCount = 0;
         diagnostics.totalSamplesReceived = 0;
+        diagnostics.totalDownsampledSamples = 0;
+        diagnostics.actualSampleRate = null;
         diagnostics.gaps = [];
         diagnostics.expectedIntervalMs = null;
     };
@@ -38,16 +42,27 @@ const AudioRecorder = (() => {
     const logDiagnosticSummary = () => {
         const elapsedMs = performance.now() - diagnostics.startTime;
         const elapsedSec = elapsedMs / 1000;
-        const expectedSamples = elapsedSec * CONFIG.SAMPLE_RATE;
+        const actualRate = diagnostics.actualSampleRate || CONFIG.SAMPLE_RATE;
+        const expectedSamples = elapsedSec * actualRate;
         const sampleRatio = diagnostics.totalSamplesReceived / expectedSamples;
 
+        // Calculate expected vs actual downsampled samples
+        const expectedDownsampled = elapsedSec * CONFIG.TARGET_SAMPLE_RATE;
+        const downsampleRatio = diagnostics.totalDownsampledSamples / expectedDownsampled;
+
         console.log('=== AUDIO RECORDING DIAGNOSTICS ===');
+        console.log(`Actual device sample rate: ${actualRate} Hz`);
         console.log(`Recording duration: ${elapsedSec.toFixed(2)}s`);
         console.log(`Callback count: ${diagnostics.callbackCount}`);
-        console.log(`Expected callbacks: ~${Math.floor(elapsedSec * CONFIG.SAMPLE_RATE / CONFIG.BUFFER_SIZE)}`);
-        console.log(`Samples received: ${diagnostics.totalSamplesReceived}`);
-        console.log(`Samples expected: ~${Math.floor(expectedSamples)}`);
-        console.log(`Sample ratio: ${(sampleRatio * 100).toFixed(1)}% (should be ~100%)`);
+        console.log(`Expected callbacks: ~${Math.floor(elapsedSec * actualRate / CONFIG.BUFFER_SIZE)}`);
+        console.log(`--- Input Samples ---`);
+        console.log(`  Received: ${diagnostics.totalSamplesReceived}`);
+        console.log(`  Expected: ~${Math.floor(expectedSamples)}`);
+        console.log(`  Ratio: ${(sampleRatio * 100).toFixed(1)}%`);
+        console.log(`--- Downsampled Output ---`);
+        console.log(`  Produced: ${diagnostics.totalDownsampledSamples}`);
+        console.log(`  Expected: ~${Math.floor(expectedDownsampled)}`);
+        console.log(`  Ratio: ${(downsampleRatio * 100).toFixed(1)}%`);
         console.log(`Gaps detected: ${diagnostics.gaps.length}`);
 
         if (diagnostics.gaps.length > 0) {
@@ -74,9 +89,11 @@ const AudioRecorder = (() => {
         init() {
             this.panel = document.getElementById('diagnosticPanel');
             this.elements = {
+                sampleRate: document.getElementById('diagSampleRate'),
                 duration: document.getElementById('diagDuration'),
                 callbacks: document.getElementById('diagCallbacks'),
                 ratio: document.getElementById('diagRatio'),
+                downsampleRatio: document.getElementById('diagDownsampleRatio'),
                 gaps: document.getElementById('diagGaps'),
                 alerts: document.getElementById('diagAlerts'),
             };
@@ -100,16 +117,28 @@ const AudioRecorder = (() => {
 
             const elapsedMs = performance.now() - diagnostics.startTime;
             const elapsedSec = elapsedMs / 1000;
-            const expectedSamples = elapsedSec * CONFIG.SAMPLE_RATE;
+            const actualRate = diagnostics.actualSampleRate || CONFIG.SAMPLE_RATE;
+            const expectedSamples = elapsedSec * actualRate;
             const sampleRatio = expectedSamples > 0
                 ? (diagnostics.totalSamplesReceived / expectedSamples) * 100
                 : 100;
+
+            // Calculate downsampling output ratio
+            const expectedDownsampled = elapsedSec * CONFIG.TARGET_SAMPLE_RATE;
+            const downsampleRatio = expectedDownsampled > 0
+                ? (diagnostics.totalDownsampledSamples / expectedDownsampled) * 100
+                : 100;
+
+            // Update sample rate display
+            if (this.elements.sampleRate) {
+                this.elements.sampleRate.textContent = `${actualRate} Hz`;
+            }
 
             this.elements.duration.textContent = `${elapsedSec.toFixed(1)}s`;
             this.elements.callbacks.textContent = diagnostics.callbackCount.toString();
             this.elements.gaps.textContent = diagnostics.gaps.length.toString();
 
-            // Update ratio with color coding
+            // Update input ratio with color coding
             this.elements.ratio.textContent = `${sampleRatio.toFixed(1)}%`;
             this.elements.ratio.className = '';
             if (sampleRatio >= 95) {
@@ -118,6 +147,19 @@ const AudioRecorder = (() => {
                 this.elements.ratio.classList.add('ratio-warn');
             } else {
                 this.elements.ratio.classList.add('ratio-bad');
+            }
+
+            // Update downsampling output ratio with color coding
+            if (this.elements.downsampleRatio) {
+                this.elements.downsampleRatio.textContent = `${downsampleRatio.toFixed(1)}%`;
+                this.elements.downsampleRatio.className = '';
+                if (downsampleRatio >= 95) {
+                    this.elements.downsampleRatio.classList.add('ratio-good');
+                } else if (downsampleRatio >= 80) {
+                    this.elements.downsampleRatio.classList.add('ratio-warn');
+                } else {
+                    this.elements.downsampleRatio.classList.add('ratio-bad');
+                }
             }
         },
 
@@ -279,8 +321,28 @@ const AudioRecorder = (() => {
                 },
             });
 
-            state.audioContext = new AudioContext({ sampleRate: CONFIG.SAMPLE_RATE });
-            console.log(`AudioContext created with sample rate: ${state.audioContext.sampleRate}`);
+            // Try to create AudioContext with preferred 48kHz sample rate
+            // If device doesn't support it, fallback to native rate
+            let audioContext;
+            try {
+                audioContext = new AudioContext({ sampleRate: CONFIG.SAMPLE_RATE });
+                // Check if device actually used our requested rate
+                if (audioContext.sampleRate !== CONFIG.SAMPLE_RATE) {
+                    // Device didn't support 48kHz, close and recreate with native rate
+                    await audioContext.close();
+                    audioContext = new AudioContext(); // Use device native rate
+                    console.log(`Device doesn't support ${CONFIG.SAMPLE_RATE} Hz, using native ${audioContext.sampleRate} Hz`);
+                    DiagnosticUI.addAlert(`Using native ${audioContext.sampleRate} Hz`, 'warning');
+                }
+            } catch (e) {
+                // Fallback to native rate if explicit rate fails
+                audioContext = new AudioContext();
+                console.log(`Fallback to native sample rate: ${audioContext.sampleRate} Hz`);
+            }
+
+            state.audioContext = audioContext;
+            diagnostics.actualSampleRate = state.audioContext.sampleRate;
+            console.log(`AudioContext using sample rate: ${state.audioContext.sampleRate} Hz`);
 
             // Calculate expected interval between callbacks
             diagnostics.expectedIntervalMs = (CONFIG.BUFFER_SIZE / state.audioContext.sampleRate) * 1000;
@@ -329,6 +391,7 @@ const AudioRecorder = (() => {
 
                 const clonedData = new Float32Array(inputData);
                 const pcm16 = AudioProcessor.downsample(clonedData, state.audioContext.sampleRate);
+                diagnostics.totalDownsampledSamples += pcm16.length;
 
                 if (shouldRemoveInitialSilence && state.recordedChunks.length === 0) {
                     if (SilenceDetector.isAbsolutelySilent(pcm16) || SilenceDetector.isBelowThreshold(pcm16)) {

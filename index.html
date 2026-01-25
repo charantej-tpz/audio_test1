@@ -38,6 +38,10 @@
       <div class="diag-header">📊 Recording Diagnostics</div>
       <div class="diag-stats">
         <div class="diag-row">
+          <span>Device Rate:</span>
+          <span id="diagSampleRate">-</span>
+        </div>
+        <div class="diag-row">
           <span>Duration:</span>
           <span id="diagDuration">0.0s</span>
         </div>
@@ -46,11 +50,15 @@
           <span id="diagCallbacks">0</span>
         </div>
         <div class="diag-row">
-          <span>Sample Ratio:</span>
+          <span>Input Ratio:</span>
           <span id="diagRatio">100%</span>
         </div>
         <div class="diag-row">
-          <span>Gaps Detected:</span>
+          <span>Output Ratio:</span>
+          <span id="diagDownsampleRatio">100%</span>
+        </div>
+        <div class="diag-row">
+          <span>Gaps:</span>
           <span id="diagGaps">0</span>
         </div>
       </div>
