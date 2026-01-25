@@ -16,6 +16,146 @@ const AudioRecorder = (() => {
         finalWavBuffer: null,
     };
 
+    // Diagnostic state to track audio callback timing
+    const diagnostics = {
+        startTime: null,
+        lastCallbackTime: null,
+        callbackCount: 0,
+        totalSamplesReceived: 0,
+        gaps: [], // Array of { timestamp, gapMs, expectedMs }
+        expectedIntervalMs: null,
+    };
+
+    const resetDiagnostics = () => {
+        diagnostics.startTime = null;
+        diagnostics.lastCallbackTime = null;
+        diagnostics.callbackCount = 0;
+        diagnostics.totalSamplesReceived = 0;
+        diagnostics.gaps = [];
+        diagnostics.expectedIntervalMs = null;
+    };
+
+    const logDiagnosticSummary = () => {
+        const elapsedMs = performance.now() - diagnostics.startTime;
+        const elapsedSec = elapsedMs / 1000;
+        const expectedSamples = elapsedSec * CONFIG.SAMPLE_RATE;
+        const sampleRatio = diagnostics.totalSamplesReceived / expectedSamples;
+
+        console.log('=== AUDIO RECORDING DIAGNOSTICS ===');
+        console.log(`Recording duration: ${elapsedSec.toFixed(2)}s`);
+        console.log(`Callback count: ${diagnostics.callbackCount}`);
+        console.log(`Expected callbacks: ~${Math.floor(elapsedSec * CONFIG.SAMPLE_RATE / CONFIG.BUFFER_SIZE)}`);
+        console.log(`Samples received: ${diagnostics.totalSamplesReceived}`);
+        console.log(`Samples expected: ~${Math.floor(expectedSamples)}`);
+        console.log(`Sample ratio: ${(sampleRatio * 100).toFixed(1)}% (should be ~100%)`);
+        console.log(`Gaps detected: ${diagnostics.gaps.length}`);
+
+        if (diagnostics.gaps.length > 0) {
+            console.log('--- Gap Details (first 10) ---');
+            diagnostics.gaps.slice(0, 10).forEach((gap, i) => {
+                const timeInRecording = (gap.timestamp - diagnostics.startTime) / 1000;
+                console.log(`  Gap ${i + 1}: at ${timeInRecording.toFixed(2)}s - was ${gap.gapMs.toFixed(0)}ms (expected ~${gap.expectedMs.toFixed(0)}ms)`);
+            });
+        }
+
+        if (sampleRatio < 0.95) {
+            console.warn(`⚠️ MISSING ~${((1 - sampleRatio) * 100).toFixed(1)}% of audio data!`);
+            console.warn('This explains the "2x speed" playback issue.');
+        }
+        console.log('===================================');
+    };
+
+    // On-screen diagnostic UI helpers
+    const DiagnosticUI = {
+        panel: null,
+        elements: {},
+        updateIntervalId: null,
+
+        init() {
+            this.panel = document.getElementById('diagnosticPanel');
+            this.elements = {
+                duration: document.getElementById('diagDuration'),
+                callbacks: document.getElementById('diagCallbacks'),
+                ratio: document.getElementById('diagRatio'),
+                gaps: document.getElementById('diagGaps'),
+                alerts: document.getElementById('diagAlerts'),
+            };
+        },
+
+        show() {
+            if (this.panel) {
+                this.panel.style.display = 'block';
+                this.elements.alerts.innerHTML = '';
+            }
+        },
+
+        hide() {
+            if (this.panel) {
+                this.panel.style.display = 'none';
+            }
+        },
+
+        update() {
+            if (!diagnostics.startTime || !this.elements.duration) return;
+
+            const elapsedMs = performance.now() - diagnostics.startTime;
+            const elapsedSec = elapsedMs / 1000;
+            const expectedSamples = elapsedSec * CONFIG.SAMPLE_RATE;
+            const sampleRatio = expectedSamples > 0
+                ? (diagnostics.totalSamplesReceived / expectedSamples) * 100
+                : 100;
+
+            this.elements.duration.textContent = `${elapsedSec.toFixed(1)}s`;
+            this.elements.callbacks.textContent = diagnostics.callbackCount.toString();
+            this.elements.gaps.textContent = diagnostics.gaps.length.toString();
+
+            // Update ratio with color coding
+            this.elements.ratio.textContent = `${sampleRatio.toFixed(1)}%`;
+            this.elements.ratio.className = '';
+            if (sampleRatio >= 95) {
+                this.elements.ratio.classList.add('ratio-good');
+            } else if (sampleRatio >= 80) {
+                this.elements.ratio.classList.add('ratio-warn');
+            } else {
+                this.elements.ratio.classList.add('ratio-bad');
+            }
+        },
+
+        addAlert(message, type = 'warning') {
+            if (!this.elements.alerts) return;
+
+            const alert = document.createElement('div');
+            alert.className = `diag-alert ${type}`;
+            alert.textContent = message;
+
+            // Keep only last 5 alerts
+            if (this.elements.alerts.children.length >= 5) {
+                this.elements.alerts.removeChild(this.elements.alerts.firstChild);
+            }
+            this.elements.alerts.appendChild(alert);
+        },
+
+        showFinalSummary(sampleRatio) {
+            const type = sampleRatio >= 95 ? 'success' : (sampleRatio >= 80 ? 'warning' : 'error');
+            const message = sampleRatio >= 95
+                ? `✅ Recording OK! ${sampleRatio.toFixed(1)}% samples captured`
+                : `⚠️ Missing ${(100 - sampleRatio).toFixed(1)}% audio data`;
+            this.addAlert(message, type);
+        },
+
+        startLiveUpdates() {
+            this.stopLiveUpdates();
+            this.updateIntervalId = setInterval(() => this.update(), 500);
+        },
+
+        stopLiveUpdates() {
+            if (this.updateIntervalId) {
+                clearInterval(this.updateIntervalId);
+                this.updateIntervalId = null;
+            }
+        }
+    };
+
     const getElements = () => ({
         recordBtn: document.getElementById("recordBtn"),
         downloadBtn: document.getElementById("downloadBtn"),
@@ -127,6 +267,7 @@ const AudioRecorder = (() => {
             const shouldRemoveInitialSilence = removeSilenceCheckbox.checked;
 
             state.recordedChunks = [];
+            resetDiagnostics();
             UI.enableDownload(false);
 
             const stream = await navigator.mediaDevices.getUserMedia({
@@ -139,6 +280,12 @@ const AudioRecorder = (() => {
             });
 
             state.audioContext = new AudioContext({ sampleRate: CONFIG.SAMPLE_RATE });
+            console.log(`AudioContext created with sample rate: ${state.audioContext.sampleRate}`);
+
+            // Calculate expected interval between callbacks
+            diagnostics.expectedIntervalMs = (CONFIG.BUFFER_SIZE / state.audioContext.sampleRate) * 1000;
+            console.log(`Expected callback interval: ~${diagnostics.expectedIntervalMs.toFixed(1)}ms`);
+
             state.mediaSource = state.audioContext.createMediaStreamSource(stream);
             state.scriptProcessor = state.audioContext.createScriptProcessor(
                 CONFIG.BUFFER_SIZE,
@@ -149,7 +296,37 @@ const AudioRecorder = (() => {
             state.scriptProcessor.onaudioprocess = (event) => {
                 if (!state.audioContext) return;
 
+                const now = performance.now();
+
+                // Initialize timing on first callback
+                if (diagnostics.startTime === null) {
+                    diagnostics.startTime = now;
+                    diagnostics.lastCallbackTime = now;
+                }
+
+                // Track timing gaps (detect missed callbacks)
+                const elapsed = now - diagnostics.lastCallbackTime;
+                const threshold = diagnostics.expectedIntervalMs * 1.8; // Allow 80% variance
+
+                if (diagnostics.callbackCount > 0 && elapsed > threshold) {
+                    diagnostics.gaps.push({
+                        timestamp: now,
+                        gapMs: elapsed,
+                        expectedMs: diagnostics.expectedIntervalMs,
+                    });
+                    const timeInRecording = (now - diagnostics.startTime) / 1000;
+                    console.warn(`⚠️ Audio gap at ${timeInRecording.toFixed(2)}s: ${elapsed.toFixed(0)}ms (expected ~${diagnostics.expectedIntervalMs.toFixed(0)}ms)`);
+
+                    // Show alert on screen
+                    DiagnosticUI.addAlert(`Gap at ${timeInRecording.toFixed(1)}s: ${elapsed.toFixed(0)}ms`, 'warning');
+                }
+
+                diagnostics.lastCallbackTime = now;
+                diagnostics.callbackCount++;
+
                 const inputData = event.inputBuffer.getChannelData(0);
+                diagnostics.totalSamplesReceived += inputData.length;
+
                 const clonedData = new Float32Array(inputData);
                 const pcm16 = AudioProcessor.downsample(clonedData, state.audioContext.sampleRate);
 
@@ -165,10 +342,29 @@ const AudioRecorder = (() => {
             state.mediaSource.connect(state.scriptProcessor);
             state.scriptProcessor.connect(state.audioContext.destination);
 
+            // Show diagnostic panel and start live updates
+            DiagnosticUI.show();
+            DiagnosticUI.startLiveUpdates();
+
             UI.setRecordingState(true);
         },
 
         stop() {
+            // Stop live UI updates
+            DiagnosticUI.stopLiveUpdates();
+
+            // Log diagnostic summary before cleanup
+            if (diagnostics.startTime !== null) {
+                logDiagnosticSummary();
+
+                // Show final summary on screen
+                const elapsedSec = (performance.now() - diagnostics.startTime) / 1000;
+                const expectedSamples = elapsedSec * CONFIG.SAMPLE_RATE;
+                const sampleRatio = (diagnostics.totalSamplesReceived / expectedSamples) * 100;
+                DiagnosticUI.update(); // Final update
+                DiagnosticUI.showFinalSummary(sampleRatio);
+            }
+
             state.mediaSource?.disconnect();
             if (state.scriptProcessor) {
                 state.scriptProcessor.disconnect();
@@ -206,6 +402,9 @@ const AudioRecorder = (() => {
 
     const init = () => {
         const { recordBtn, downloadBtn } = getElements();
+
+        // Initialize diagnostic UI
+        DiagnosticUI.init();
 
         recordBtn.onclick = () => RecordingController.toggle();
         downloadBtn.onclick = downloadRecording;

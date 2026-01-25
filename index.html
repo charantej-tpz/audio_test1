@@ -32,6 +32,30 @@
     </div>
 
     <button id="downloadBtn" class="download" disabled>Download WAV</button>
+
+    <!-- Diagnostic Panel for Mobile Testing -->
+    <div id="diagnosticPanel" class="diagnostic-panel" style="display: none;">
+      <div class="diag-header">📊 Recording Diagnostics</div>
+      <div class="diag-stats">
+        <div class="diag-row">
+          <span>Duration:</span>
+          <span id="diagDuration">0.0s</span>
+        </div>
+        <div class="diag-row">
+          <span>Callbacks:</span>
+          <span id="diagCallbacks">0</span>
+        </div>
+        <div class="diag-row">
+          <span>Sample Ratio:</span>
+          <span id="diagRatio">100%</span>
+        </div>
+        <div class="diag-row">
+          <span>Gaps Detected:</span>
+          <span id="diagGaps">0</span>
+        </div>
+      </div>
+      <div id="diagAlerts" class="diag-alerts"></div>
+    </div>
   </div>
 </body>
 
