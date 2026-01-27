@@ -245,17 +245,143 @@ body {
     font-size: 18px;
 }
 
-/* Responsive */
-@media (max-width: 420px) {
+/* Responsive - Tablet */
+@media (max-width: 768px) {
     .container {
-        width: 95%;
-        padding: 24px;
-        margin: 16px;
+        width: 90%;
+        padding: 32px;
+    }
+
+    h1 {
+        font-size: 22px;
+    }
+}
+
+/* Responsive - Mobile */
+@media (max-width: 480px) {
+    body {
+        padding: 16px 0;
+    }
+
+    .container {
+        width: 94%;
+        padding: 24px 20px;
+        margin: 8px auto;
+        border-radius: 20px;
+    }
+
+    h1 {
+        font-size: 20px;
+        margin-bottom: 24px;
+    }
+
+    .label {
+        font-size: 12px;
+    }
+
+    .dropdown {
+        padding: 12px 14px;
+        font-size: 15px;
+    }
+
+    .checkbox-row {
+        padding: 14px;
+        margin: 20px 0;
+    }
+
+    .checkbox-row label {
+        font-size: 13px;
+    }
+
+    .record-area {
+        margin: 24px 0;
+        gap: 20px;
+    }
+
+    .mic-icon {
+        font-size: 40px;
+        width: 80px;
+        height: 80px;
     }
 
     .btn {
-        padding: 14px 32px;
+        padding: 14px 28px;
         font-size: 14px;
+        width: 100%;
+        border-radius: 12px;
+    }
+
+    .download {
+        padding: 14px;
+        font-size: 14px;
+    }
+
+    /* Diagnostic Panel - Mobile */
+    .diagnostic-panel {
+        padding: 14px;
+        margin-top: 20px;
+        font-size: 12px;
+    }
+
+    .diag-header {
+        font-size: 13px;
+        margin-bottom: 10px;
+    }
+
+    .diag-stats {
+        gap: 6px;
+    }
+
+    .diag-row {
+        padding: 6px 0;
+        font-size: 13px;
+    }
+
+    .diag-row span:first-child {
+        font-size: 12px;
+    }
+
+    .diag-row span:last-child {
+        font-size: 14px;
+    }
+
+    .diag-alerts {
+        max-height: 120px;
+    }
+
+    .diag-alert {
+        padding: 10px 12px;
+        font-size: 12px;
+        border-radius: 6px;
+    }
+}
+
+/* Responsive - Small Mobile */
+@media (max-width: 360px) {
+    .container {
+        width: 100%;
+        margin: 0;
+        border-radius: 0;
+        min-height: 100vh;
+    }
+
+    h1 {
+        font-size: 18px;
+    }
+
+    .mic-icon {
+        font-size: 36px;
+        width: 70px;
+        height: 70px;
+    }
+
+    .btn {
+        padding: 12px 20px;
+        font-size: 13px;
+    }
+
+    .diag-row span {
+        font-size: 12px !important;
     }
 }
 
@@ -326,8 +452,15 @@ h1 {
 }
 
 @keyframes alertFadeIn {
-    from { opacity: 0; transform: translateY(-5px); }
-    to { opacity: 1; transform: translateY(0); }
+    from {
+        opacity: 0;
+        transform: translateY(-5px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 .diag-alert.warning {
@@ -349,6 +482,14 @@ h1 {
 }
 
 /* Sample ratio color coding */
-.ratio-good { color: #4ade80 !important; }
-.ratio-warn { color: #fbbf24 !important; }
-.ratio-bad { color: #f87171 !important; }
+.ratio-good {
+    color: #4ade80 !important;
+}
+
+.ratio-warn {
+    color: #fbbf24 !important;
+}
+
+.ratio-bad {
+    color: #f87171 !important;
+}

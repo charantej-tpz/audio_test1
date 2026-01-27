@@ -1,7 +1,6 @@
 const AudioRecorder = (() => {
     const CONFIG = {
-        SAMPLE_RATE: 48000,
-        TARGET_SAMPLE_RATE: 16000,
+        SAMPLE_RATE: 16000,  // Record directly at 16kHz - no downsampling needed
         BUFFER_SIZE: 4096,
         SILENCE_THRESHOLD: 25,
         BIT_DEPTH: 16,
@@ -12,8 +11,9 @@ const AudioRecorder = (() => {
         audioContext: null,
         scriptProcessor: null,
         mediaSource: null,
-        recordedChunks: [],
+        audioWorker: null,      // Web Worker for processing
         finalWavBuffer: null,
+        isProcessingComplete: false,
     };
 
     // Diagnostic state to track audio callback timing
@@ -47,7 +47,7 @@ const AudioRecorder = (() => {
         const sampleRatio = diagnostics.totalSamplesReceived / expectedSamples;
 
         // Calculate expected vs actual downsampled samples
-        const expectedDownsampled = elapsedSec * CONFIG.TARGET_SAMPLE_RATE;
+        const expectedDownsampled = elapsedSec * CONFIG.SAMPLE_RATE;
         const downsampleRatio = diagnostics.totalDownsampledSamples / expectedDownsampled;
 
         console.log('=== AUDIO RECORDING DIAGNOSTICS ===');
@@ -124,7 +124,7 @@ const AudioRecorder = (() => {
                 : 100;
 
             // Calculate downsampling output ratio
-            const expectedDownsampled = elapsedSec * CONFIG.TARGET_SAMPLE_RATE;
+            const expectedDownsampled = elapsedSec * CONFIG.SAMPLE_RATE;
             const downsampleRatio = expectedDownsampled > 0
                 ? (diagnostics.totalDownsampledSamples / expectedDownsampled) * 100
                 : 100;
@@ -205,89 +205,30 @@ const AudioRecorder = (() => {
         micIcon: document.querySelector(".mic-icon"),
     });
 
-    const AudioProcessor = {
-        downsample(float32Data, sourceRate) {
-            const ratio = sourceRate / CONFIG.TARGET_SAMPLE_RATE;
-            const outputLength = Math.floor(float32Data.length / ratio);
-            const output = new Int16Array(outputLength);
-
-            for (let i = 0; i < outputLength; i++) {
-                const srcIndex = i * ratio;
-                const floor = Math.floor(srcIndex);
-                const ceil = Math.min(floor + 1, float32Data.length - 1);
-                const fraction = srcIndex - floor;
-
-                const interpolated = float32Data[floor] * (1 - fraction) + float32Data[ceil] * fraction;
-                output[i] = interpolated * 0x7fff;
-            }
-
-            return output;
-        },
-
-        mergeChunks(chunks) {
-            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-            const merged = new Int16Array(totalLength);
-
-            let offset = 0;
-            for (const chunk of chunks) {
-                merged.set(chunk, offset);
-                offset += chunk.length;
-            }
-
-            return merged;
-        },
-    };
+    // AudioProcessor moved to Web Worker (audio-worker.js)
 
     const SilenceDetector = {
-        isAbsolutelySilent(samples) {
-            return samples.every(sample => sample === 0);
+        // Float32 version (values between -1 and 1)
+        isAbsolutelySilentFloat32(samples) {
+            for (let i = 0; i < samples.length; i++) {
+                if (samples[i] !== 0) return false;
+            }
+            return true;
         },
 
-        isBelowThreshold(samples) {
-            const sumOfSquares = samples.reduce((sum, val) => sum + val * val, 0);
+        isBelowThresholdFloat32(samples) {
+            let sumOfSquares = 0;
+            for (let i = 0; i < samples.length; i++) {
+                sumOfSquares += samples[i] * samples[i];
+            }
             const rms = Math.sqrt(sumOfSquares / samples.length);
-            return rms < CONFIG.SILENCE_THRESHOLD;
+            // Threshold is now in Float32 scale (0.0 to 1.0)
+            // 25/32767 ≈ 0.00076 in Float32 scale
+            return rms < 0.001;
         },
     };
 
-    const WavEncoder = {
-        writeString(view, offset, text) {
-            for (let i = 0; i < text.length; i++) {
-                view.setUint8(offset + i, text.charCodeAt(i));
-            }
-        },
-
-        encode(samples) {
-            const headerSize = 44;
-            const dataSize = samples.length * 2;
-            const buffer = new ArrayBuffer(headerSize + dataSize);
-            const view = new DataView(buffer);
-
-            this.writeString(view, 0, "RIFF");
-            view.setUint32(4, 36 + dataSize, true);
-            this.writeString(view, 8, "WAVE");
-
-            this.writeString(view, 12, "fmt ");
-            view.setUint32(16, 16, true);
-            view.setUint16(20, 1, true);
-            view.setUint16(22, CONFIG.CHANNELS, true);
-            view.setUint32(24, CONFIG.TARGET_SAMPLE_RATE, true);
-            view.setUint32(28, CONFIG.TARGET_SAMPLE_RATE * 2, true);
-            view.setUint16(32, 2, true);
-            view.setUint16(34, CONFIG.BIT_DEPTH, true);
-
-            this.writeString(view, 36, "data");
-            view.setUint32(40, dataSize, true);
-
-            let writeOffset = headerSize;
-            for (const sample of samples) {
-                view.setInt16(writeOffset, sample, true);
-                writeOffset += 2;
-            }
-
-            return buffer;
-        },
-    };
+    // WavEncoder moved to Web Worker (audio-worker.js)
 
     const UI = {
         setRecordingState(isRecording) {
@@ -308,8 +249,9 @@ const AudioRecorder = (() => {
             const { removeSilenceCheckbox } = getElements();
             const shouldRemoveInitialSilence = removeSilenceCheckbox.checked;
 
-            state.recordedChunks = [];
             resetDiagnostics();
+            state.finalWavBuffer = null;
+            state.isProcessingComplete = false;
             UI.enableDownload(false);
 
             const stream = await navigator.mediaDevices.getUserMedia({
@@ -321,21 +263,20 @@ const AudioRecorder = (() => {
                 },
             });
 
-            // Try to create AudioContext with preferred 48kHz sample rate
-            // If device doesn't support it, fallback to native rate
+            // Try to create AudioContext with 16kHz (preferred for direct recording)
+            // If not available, use native rate and downsample in worker
             let audioContext;
             try {
                 audioContext = new AudioContext({ sampleRate: CONFIG.SAMPLE_RATE });
-                // Check if device actually used our requested rate
                 if (audioContext.sampleRate !== CONFIG.SAMPLE_RATE) {
-                    // Device didn't support 48kHz, close and recreate with native rate
                     await audioContext.close();
-                    audioContext = new AudioContext(); // Use device native rate
-                    console.log(`Device doesn't support ${CONFIG.SAMPLE_RATE} Hz, using native ${audioContext.sampleRate} Hz`);
-                    DiagnosticUI.addAlert(`Using native ${audioContext.sampleRate} Hz`, 'warning');
+                    audioContext = new AudioContext();
+                    console.log(`Device doesn't support ${CONFIG.SAMPLE_RATE} Hz, using native ${audioContext.sampleRate} Hz (will downsample)`);
+                    DiagnosticUI.addAlert(`Native ${audioContext.sampleRate} Hz → downsample to 16kHz`, 'warning');
+                } else {
+                    console.log(`Recording directly at ${CONFIG.SAMPLE_RATE} Hz (no downsampling needed)`);
                 }
             } catch (e) {
-                // Fallback to native rate if explicit rate fails
                 audioContext = new AudioContext();
                 console.log(`Fallback to native sample rate: ${audioContext.sampleRate} Hz`);
             }
@@ -344,7 +285,36 @@ const AudioRecorder = (() => {
             diagnostics.actualSampleRate = state.audioContext.sampleRate;
             console.log(`AudioContext using sample rate: ${state.audioContext.sampleRate} Hz`);
 
-            // Calculate expected interval between callbacks
+            // Initialize Web Worker with source sample rate info
+            state.audioWorker = new Worker('/src/audio-worker.js');
+            state.audioWorker.postMessage({
+                type: 'init',
+                data: { sourceSampleRate: state.audioContext.sampleRate }
+            });
+
+            // Handle messages from worker
+            state.audioWorker.onmessage = (event) => {
+                const { type, wavBuffer, samplesProcessed, totalSamples, needsDownsampling } = event.data;
+
+                switch (type) {
+                    case 'ready':
+                        if (needsDownsampling) {
+                            console.log('Worker will downsample to 16kHz');
+                        }
+                        break;
+                    case 'processed':
+                        diagnostics.totalDownsampledSamples += samplesProcessed;
+                        break;
+                    case 'complete':
+                        state.finalWavBuffer = wavBuffer;
+                        state.isProcessingComplete = true;
+                        UI.enableDownload(true);
+                        DiagnosticUI.addAlert(`WAV ready: ${totalSamples} samples @ 16kHz`, 'success');
+                        console.log(`Worker finished: WAV with ${totalSamples} samples`);
+                        break;
+                }
+            };
+
             diagnostics.expectedIntervalMs = (CONFIG.BUFFER_SIZE / state.audioContext.sampleRate) * 1000;
             console.log(`Expected callback interval: ~${diagnostics.expectedIntervalMs.toFixed(1)}ms`);
 
@@ -355,8 +325,11 @@ const AudioRecorder = (() => {
                 CONFIG.CHANNELS
             );
 
+            // Track if we've started recording (for silence removal)
+            let hasRecordedAudio = false;
+
             state.scriptProcessor.onaudioprocess = (event) => {
-                if (!state.audioContext) return;
+                if (!state.audioContext || !state.audioWorker) return;
 
                 const now = performance.now();
 
@@ -366,9 +339,9 @@ const AudioRecorder = (() => {
                     diagnostics.lastCallbackTime = now;
                 }
 
-                // Track timing gaps (detect missed callbacks)
+                // Track timing gaps
                 const elapsed = now - diagnostics.lastCallbackTime;
-                const threshold = diagnostics.expectedIntervalMs * 1.8; // Allow 80% variance
+                const threshold = diagnostics.expectedIntervalMs * 1.8;
 
                 if (diagnostics.callbackCount > 0 && elapsed > threshold) {
                     diagnostics.gaps.push({
@@ -377,9 +350,7 @@ const AudioRecorder = (() => {
                         expectedMs: diagnostics.expectedIntervalMs,
                     });
                     const timeInRecording = (now - diagnostics.startTime) / 1000;
-                    console.warn(`⚠️ Audio gap at ${timeInRecording.toFixed(2)}s: ${elapsed.toFixed(0)}ms (expected ~${diagnostics.expectedIntervalMs.toFixed(0)}ms)`);
-
-                    // Show alert on screen
+                    console.warn(`⚠️ Audio gap at ${timeInRecording.toFixed(2)}s: ${elapsed.toFixed(0)}ms`);
                     DiagnosticUI.addAlert(`Gap at ${timeInRecording.toFixed(1)}s: ${elapsed.toFixed(0)}ms`, 'warning');
                 }
 
@@ -389,23 +360,25 @@ const AudioRecorder = (() => {
                 const inputData = event.inputBuffer.getChannelData(0);
                 diagnostics.totalSamplesReceived += inputData.length;
 
-                const clonedData = new Float32Array(inputData);
-                const pcm16 = AudioProcessor.downsample(clonedData, state.audioContext.sampleRate);
-                diagnostics.totalDownsampledSamples += pcm16.length;
-
-                if (shouldRemoveInitialSilence && state.recordedChunks.length === 0) {
-                    if (SilenceDetector.isAbsolutelySilent(pcm16) || SilenceDetector.isBelowThreshold(pcm16)) {
-                        return;
+                // Silence detection (quick check on main thread)
+                if (shouldRemoveInitialSilence && !hasRecordedAudio) {
+                    if (SilenceDetector.isAbsolutelySilentFloat32(inputData) || SilenceDetector.isBelowThresholdFloat32(inputData)) {
+                        return; // Skip silent frames at the beginning
                     }
+                    hasRecordedAudio = true;
                 }
 
-                state.recordedChunks.push(pcm16);
+                // Send Float32 data to worker for processing (copy buffer)
+                const bufferCopy = new Float32Array(inputData);
+                state.audioWorker.postMessage({
+                    type: 'process',
+                    data: { buffer: bufferCopy.buffer }
+                }, [bufferCopy.buffer]);
             };
 
             state.mediaSource.connect(state.scriptProcessor);
             state.scriptProcessor.connect(state.audioContext.destination);
 
-            // Show diagnostic panel and start live updates
             DiagnosticUI.show();
             DiagnosticUI.startLiveUpdates();
 
@@ -413,18 +386,15 @@ const AudioRecorder = (() => {
         },
 
         stop() {
-            // Stop live UI updates
             DiagnosticUI.stopLiveUpdates();
 
-            // Log diagnostic summary before cleanup
             if (diagnostics.startTime !== null) {
                 logDiagnosticSummary();
 
-                // Show final summary on screen
                 const elapsedSec = (performance.now() - diagnostics.startTime) / 1000;
-                const expectedSamples = elapsedSec * CONFIG.SAMPLE_RATE;
+                const expectedSamples = elapsedSec * (diagnostics.actualSampleRate || CONFIG.SAMPLE_RATE);
                 const sampleRatio = (diagnostics.totalSamplesReceived / expectedSamples) * 100;
-                DiagnosticUI.update(); // Final update
+                DiagnosticUI.update();
                 DiagnosticUI.showFinalSummary(sampleRatio);
             }
 
@@ -434,14 +404,20 @@ const AudioRecorder = (() => {
                 state.scriptProcessor.onaudioprocess = null;
             }
 
-            const mergedPCM = AudioProcessor.mergeChunks(state.recordedChunks);
-            state.finalWavBuffer = WavEncoder.encode(mergedPCM);
+            // Request worker to build WAV file
+            if (state.audioWorker) {
+                DiagnosticUI.addAlert('Building WAV file...', 'warning');
+                state.audioWorker.postMessage({
+                    type: 'finish',
+                    data: { sampleRate: diagnostics.actualSampleRate || CONFIG.SAMPLE_RATE }
+                });
+            }
 
             state.audioContext?.close();
             state.audioContext = null;
 
             UI.setRecordingState(false);
-            UI.enableDownload(true);
+            // Note: Download button enabled when worker sends 'complete' message
         },
 
         toggle() {
