@@ -14,6 +14,7 @@ const AudioRecorder = (() => {
         audioWorker: null,      // Web Worker for processing
         finalWavBuffer: null,
         isProcessingComplete: false,
+        wakeLock: null,         // Wake Lock to prevent screen sleep
     };
 
     // Diagnostic state to track audio callback timing
@@ -244,6 +245,61 @@ const AudioRecorder = (() => {
         },
     };
 
+    // Wake Lock Manager - Prevents screen from sleeping during recording
+    const WakeLockManager = {
+        async acquire() {
+            if (!('wakeLock' in navigator)) {
+                console.warn('Wake Lock API not supported');
+                DiagnosticUI.addAlert('Wake Lock not supported - screen may sleep', 'warning');
+                return;
+            }
+
+            try {
+                state.wakeLock = await navigator.wakeLock.request('screen');
+                console.log('Wake Lock acquired');
+                DiagnosticUI.addAlert('Screen wake lock acquired', 'success');
+
+                // Re-acquire wake lock if visibility changes (e.g., tab switch and return)
+                state.wakeLock.addEventListener('release', () => {
+                    console.log('Wake Lock released');
+                });
+
+                // Handle visibility change to re-acquire lock when page becomes visible again
+                document.addEventListener('visibilitychange', this._handleVisibilityChange);
+            } catch (err) {
+                console.error(`Wake Lock error: ${err.name}, ${err.message}`);
+                DiagnosticUI.addAlert(`Wake Lock failed: ${err.message}`, 'warning');
+            }
+        },
+
+        async release() {
+            document.removeEventListener('visibilitychange', this._handleVisibilityChange);
+
+            if (state.wakeLock) {
+                try {
+                    await state.wakeLock.release();
+                    state.wakeLock = null;
+                    console.log('Wake Lock released manually');
+                } catch (err) {
+                    console.error('Error releasing wake lock:', err);
+                }
+            }
+        },
+
+        async _handleVisibilityChange() {
+            // Re-acquire wake lock if page becomes visible and we're still recording
+            if (document.visibilityState === 'visible' && state.audioContext && !state.wakeLock) {
+                console.log('Page visible again, re-acquiring wake lock');
+                try {
+                    state.wakeLock = await navigator.wakeLock.request('screen');
+                    DiagnosticUI.addAlert('Wake lock re-acquired', 'success');
+                } catch (err) {
+                    console.warn('Could not re-acquire wake lock:', err);
+                }
+            }
+        }
+    };
+
     const RecordingController = {
         async start() {
             const { removeSilenceCheckbox } = getElements();
@@ -315,6 +371,12 @@ const AudioRecorder = (() => {
                 }
             };
 
+            // Handle worker errors
+            state.audioWorker.onerror = (error) => {
+                console.error('Audio Worker error:', error);
+                DiagnosticUI.addAlert(`Worker error: ${error.message}`, 'danger');
+            };
+
             diagnostics.expectedIntervalMs = (CONFIG.BUFFER_SIZE / state.audioContext.sampleRate) * 1000;
             console.log(`Expected callback interval: ~${diagnostics.expectedIntervalMs.toFixed(1)}ms`);
 
@@ -382,6 +444,9 @@ const AudioRecorder = (() => {
             DiagnosticUI.show();
             DiagnosticUI.startLiveUpdates();
 
+            // Acquire wake lock to prevent screen from sleeping
+            await WakeLockManager.acquire();
+
             UI.setRecordingState(true);
         },
 
@@ -415,6 +480,9 @@ const AudioRecorder = (() => {
 
             state.audioContext?.close();
             state.audioContext = null;
+
+            // Release wake lock
+            WakeLockManager.release();
 
             UI.setRecordingState(false);
             // Note: Download button enabled when worker sends 'complete' message
